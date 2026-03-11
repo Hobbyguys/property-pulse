@@ -1,10 +1,12 @@
 // netlify/functions/imf-commodity.js
-// Iron ore price via API Ninjas /v1/commodityprices (free tier, 3000 calls/month)
+// Iron ore price via API Ninjas
+// Current price: /v1/commodityprice?name=iron+ore
+// Historical:    /v1/commoditypricehistorical?name=iron+ore&interval=1d
 const https = require("https");
 
-function httpGet(url, apiKey) {
+function apiNinjas(path, apiKey) {
   return new Promise((resolve, reject) => {
-    https.get(url, {
+    https.get(`https://api.api-ninjas.com${path}`, {
       headers: {
         "X-Api-Key": apiKey,
         "Accept": "application/json",
@@ -22,34 +24,50 @@ function httpGet(url, apiKey) {
 
 exports.handler = async () => {
   const CORS = { "Access-Control-Allow-Origin": "*", "Content-Type": "application/json" };
-  const API_KEY = "8O2psrYLsboMKmQ7FfSEV9RtfEidOM781mSO1Yoc";
+  const API_KEY = process.env.API_NINJAS_KEY;
+  if (!API_KEY) return { statusCode: 500, headers: CORS, body: JSON.stringify({ error: "API_NINJAS_KEY not set" }) };
 
   try {
-    const { status, json } = await httpGet(
-      "https://api.api-ninjas.com/v1/commodityprices?name=iron%20ore",
-      API_KEY
-    );
+    // Fetch current price + last 30 daily closes for sparkline
+    const [current, historical] = await Promise.all([
+      apiNinjas("/v1/commodityprice?name=iron+ore", API_KEY),
+      apiNinjas("/v1/commoditypricehistorical?name=iron+ore&interval=1d", API_KEY),
+    ]);
 
-    if (status !== 200) throw new Error(`HTTP ${status}: ${JSON.stringify(json)}`);
+    if (current.status !== 200) throw new Error(`Current price HTTP ${current.status}: ${JSON.stringify(current.json)}`);
 
-    // Response: { name, price, updated } or array — log shape for debug
-    // Handle both array and single object
-    const item = Array.isArray(json) ? json[0] : json;
-    if (!item || item.price == null) throw new Error("Unexpected shape: " + JSON.stringify(json).slice(0, 200));
+    const item = Array.isArray(current.json) ? current.json[0] : current.json;
+    if (!item || item.price == null) throw new Error("Unexpected shape: " + JSON.stringify(current.json).slice(0, 200));
 
     const latest = parseFloat(item.price);
     if (isNaN(latest)) throw new Error("Non-numeric price: " + item.price);
 
-    const status2 = latest >= 120 ? "green" : latest >= 90 ? "amber" : "red";
+    // Build trend from historical daily closes (returned newest-first)
+    let trend = [];
+    let change = null;
+    if (historical.status === 200 && Array.isArray(historical.json) && historical.json.length >= 2) {
+      const sorted = historical.json
+        .filter(r => r.close != null)
+        .sort((a, b) => a.timestamp - b.timestamp);
+      // Sample ~6 evenly spaced points for sparkline
+      const step = Math.max(1, Math.floor(sorted.length / 6));
+      trend = sorted.filter((_, i) => i % step === 0).slice(-6).map(r => parseFloat(parseFloat(r.close).toFixed(1)));
+      // Ensure latest is last point
+      if (trend[trend.length - 1] !== latest) trend.push(latest);
+      // Change vs previous close
+      const prev = sorted[sorted.length - 2]?.close;
+      if (prev) change = parseFloat((((latest - prev) / prev) * 100).toFixed(1));
+    }
+
+    const status = latest >= 120 ? "green" : latest >= 90 ? "amber" : "red";
 
     return { statusCode: 200, headers: CORS, body: JSON.stringify({
       value: `$${latest.toFixed(0)}`,
-      change: null,   // API Ninjas spot price only — no historical series
-      trend: [],
+      change,
+      trend,
       unit: "USD/t iron ore",
-      status: status2,
-      statusLabel: status2 === "green" ? "Strong Demand" : status2 === "amber" ? "Moderate" : "Weak Demand",
-      note: item.updated ? `Updated ${item.updated}` : "Live spot price",
+      status,
+      statusLabel: status === "green" ? "Strong Demand" : status === "amber" ? "Moderate" : "Weak Demand",
     })};
   } catch (err) {
     console.error("imf-commodity:", err.message);
