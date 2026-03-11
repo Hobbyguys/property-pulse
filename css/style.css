@@ -26,8 +26,8 @@
   --blue-bd:   rgba(91,164,232,0.25);
   --locked:    rgba(255,255,255,0.08);
   --locked-bd: rgba(255,255,255,0.12);
-  --font-display: 'Syne', sans-serif;
-  --font-mono:    'DM Mono', monospace;
+  --font-display: 'Syne', 'Inter', system-ui, sans-serif;
+  --font-mono:    'DM Mono', 'Fira Code', 'Cascadia Code', 'Consolas', 'SF Mono', monospace;
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
