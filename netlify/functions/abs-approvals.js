@@ -1,6 +1,7 @@
 // netlify/functions/abs-approvals.js
-// ABS BA — Building Approvals, WA, monthly total dwellings
-// Dataflow: BA (confirmed from ABS docs)
+// ABS RES_DWELL — Residential Dwellings approved, WA (Perth + Rest of WA), quarterly
+// Confirmed working dataflow. WA regions: 5GPER (Perth) + 5RWAU (Rest of WA)
+// Measure 1 = total dwellings approved, FREQ = Q (quarterly)
 const https = require("https");
 const http  = require("http");
 
@@ -10,7 +11,7 @@ function httpGet(url, depth = 0) {
     const lib = url.startsWith("https") ? https : http;
     lib.get(url, {
       headers: {
-        "Accept": "text/csv",
+        "Accept": "text/csv, */*",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
       }
     }, (res) => {
@@ -26,50 +27,46 @@ function httpGet(url, depth = 0) {
   });
 }
 
-function parseCSV(csv) {
-  const lines = csv.trim().split("\n");
-  const headers = lines[0].split(",").map(h => h.replace(/"/g, "").trim());
-  return lines.slice(1).map(line => {
-    const vals = line.split(",").map(v => v.replace(/"/g, "").trim());
-    return Object.fromEntries(headers.map((h, i) => [h, vals[i]]));
-  });
-}
-
 exports.handler = async () => {
   const CORS = { "Access-Control-Allow-Origin": "*", "Content-Type": "application/json" };
   try {
-    // BA dataflow, WA = state 5, measure 1 = total dwellings, monthly
-    const url = "https://data.api.abs.gov.au/rest/data/ABS,BA/all?startPeriod=2023-01&format=csv&detail=dataonly";
+    // Fetch last 8 quarters for WA — both Perth (5GPER) and Rest of WA (5RWAU), measure 1
+    const url = "https://data.api.abs.gov.au/rest/data/ABS,RES_DWELL/1.5GPER+5RWAU.Q?lastNObservations=8&format=csv&detail=dataonly";
     const csv = await httpGet(url);
-    const rows = parseCSV(csv);
 
-    // Filter to WA total dwellings (measure 1, region 5, no sub-type)
-    const waRows = rows.filter(r => {
-      const region  = r.REGION || r.STATE || "";
-      const measure = r.MEASURE || "";
-      return region === "5" && (measure === "1" || measure === "10");
+    const lines = csv.trim().split("\n").filter(l => l.trim());
+    if (lines.length < 2) throw new Error("Empty CSV from RES_DWELL");
+
+    const headers = lines[0].split(",").map(h => h.replace(/"/g, "").trim());
+    const rows = lines.slice(1).map(line => {
+      const vals = line.split(",").map(v => v.replace(/"/g, "").trim());
+      return Object.fromEntries(headers.map((h, i) => [h, vals[i]]));
     });
 
-    if (waRows.length < 2) {
-      // Return diagnostic info
-      return { statusCode: 200, headers: CORS, body: JSON.stringify({
-        error: `WA rows found: ${waRows.length}. Sample headers: ${JSON.stringify(rows[0])}`,
-      })};
+    // Group by TIME_PERIOD and sum Perth + Rest of WA
+    const byPeriod = {};
+    for (const row of rows) {
+      const period = row.TIME_PERIOD;
+      const val = parseFloat(row.OBS_VALUE);
+      if (!isNaN(val)) {
+        byPeriod[period] = (byPeriod[period] || 0) + val;
+      }
     }
 
-    waRows.sort((a, b) => (a.TIME_PERIOD || "").localeCompare(b.TIME_PERIOD || ""));
-    const vals = waRows.map(r => parseFloat(r.OBS_VALUE)).filter(v => !isNaN(v) && v > 0);
+    const periods = Object.keys(byPeriod).sort();
+    if (periods.length < 2) throw new Error(`Not enough periods. Found: ${periods.length}`);
 
-    const latest = Math.round(vals[vals.length - 1]);
-    const prev   = Math.round(vals[vals.length - 2]);
+    const vals = periods.map(p => Math.round(byPeriod[p]));
+    const latest = vals[vals.length - 1];
+    const prev   = vals[vals.length - 2];
     const change = parseFloat((((latest - prev) / prev) * 100).toFixed(1));
 
     return { statusCode: 200, headers: CORS, body: JSON.stringify({
       value: latest.toLocaleString(),
       change,
-      trend: vals.slice(-6).map(v => Math.round(v)),
-      unit: "dwellings/mo",
-      status: latest >= 2000 ? "green" : latest >= 1400 ? "amber" : "red",
+      trend: vals.slice(-6),
+      unit: "dwellings/qtr WA",
+      status: latest >= 7000 ? "green" : latest >= 5000 ? "amber" : "red",
       statusLabel: change >= 0 ? "Rising Supply" : "Declining Supply",
     })};
   } catch (err) {
