@@ -1,4 +1,4 @@
-// netlify/functions/abs-debug.js — tests candidate building approvals dataflow IDs
+// abs-debug.js — inspect RES_DWELL structure to find WA region code
 const https = require("https");
 const http  = require("http");
 
@@ -8,7 +8,7 @@ function httpGet(url, depth = 0) {
     const lib = url.startsWith("https") ? https : http;
     lib.get(url, {
       headers: {
-        "Accept": "text/csv, application/json, */*",
+        "Accept": "text/csv, */*",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
       }
     }, (res) => {
@@ -18,33 +18,35 @@ function httpGet(url, depth = 0) {
       }
       let data = "";
       res.on("data", c => data += c);
-      res.on("end", () => resolve({ status: res.statusCode, body: data.slice(0, 500) }));
+      res.on("end", () => resolve({ status: res.statusCode, body: data }));
     }).on("error", reject);
   });
 }
 
 exports.handler = async () => {
   const CORS = { "Access-Control-Allow-Origin": "*", "Content-Type": "application/json" };
-  const results = {};
-  const candidates = [
-    "BUILDING_APPROVALS_STATES",
-    "BUILDING_APPROVALS",
-    "ABS_BA_STATES",
-    "BA_STATES",
-    "DWELLING_APPROVALS",
-    "DWELL_APPROVALS",
-    "RES_DWELL_STATES",
-    "RES_DWELL",
-    "BUILDING_ACTIVITY",
-  ];
-  for (const id of candidates) {
-    const url = `https://data.api.abs.gov.au/rest/data/ABS,${id}/all?lastNObservations=1&format=csv&detail=dataonly`;
-    try {
-      const r = await httpGet(url);
-      results[id] = { status: r.status, ok: r.status === 200, preview: r.body.slice(0, 150) };
-    } catch(e) {
-      results[id] = { error: e.message };
-    }
+  try {
+    // Get all RES_DWELL data, last 1 observation — just need to see all region codes
+    const url = "https://data.api.abs.gov.au/rest/data/ABS,RES_DWELL/all?lastNObservations=1&format=csv&detail=dataonly";
+    const r = await httpGet(url);
+    const lines = r.body.trim().split("\n").filter(l => l.trim());
+    const headers = lines[0].split(",").map(h => h.replace(/"/g, "").trim());
+    const rows = lines.slice(1).map(line => {
+      const vals = line.split(",").map(v => v.replace(/"/g, "").trim());
+      return Object.fromEntries(headers.map((h, i) => [h, vals[i]]));
+    });
+    // Return unique region codes and all distinct values per column
+    const regionCodes = [...new Set(rows.map(r => r.REGION))].sort();
+    const measureCodes = [...new Set(rows.map(r => r.MEASURE))].sort();
+    const freqCodes = [...new Set(rows.map(r => r.FREQ))].sort();
+    return { statusCode: 200, headers: CORS, body: JSON.stringify({
+      headers,
+      regionCodes,
+      measureCodes,
+      freqCodes,
+      sampleRows: rows.slice(0, 6),
+    }, null, 2)};
+  } catch(e) {
+    return { statusCode: 200, headers: CORS, body: JSON.stringify({ error: e.message }) };
   }
-  return { statusCode: 200, headers: CORS, body: JSON.stringify(results, null, 2) };
 };
