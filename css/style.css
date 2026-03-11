@@ -303,12 +303,12 @@ main {
 
 /* Value */
 .card-value {
-  font-family: var(--font-display);
+  font-family: var(--font-mono);
   font-size: 2rem;
-  font-weight: 800;
+  font-weight: 500;
   color: #fff;
   line-height: 1;
-  letter-spacing: -0.03em;
+  letter-spacing: -0.02em;
   margin-bottom: 8px;
 }
 
