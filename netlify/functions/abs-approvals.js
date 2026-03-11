@@ -1,6 +1,6 @@
 // netlify/functions/abs-approvals.js
-// ABS Building Approvals — Total dwellings, Western Australia, monthly
-// New API base: https://data.api.abs.gov.au/rest/data/
+// ABS BA — Building Approvals, WA, monthly total dwellings
+// Dataflow: BA (confirmed from ABS docs)
 const https = require("https");
 const http  = require("http");
 
@@ -10,40 +10,55 @@ function httpGet(url, depth = 0) {
     const lib = url.startsWith("https") ? https : http;
     lib.get(url, {
       headers: {
-        "Accept": "application/json",
+        "Accept": "text/csv",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
       }
     }, (res) => {
       if ([301,302,303,307,308].includes(res.statusCode)) {
         const loc = res.headers.location;
-        if (!loc) return reject(new Error("Redirect with no Location"));
         return httpGet(loc.startsWith("http") ? loc : new URL(loc, url).href, depth + 1).then(resolve).catch(reject);
       }
       if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
       let data = "";
       res.on("data", c => data += c);
-      res.on("end", () => { try { resolve(JSON.parse(data)); } catch(e) { reject(new Error("Invalid JSON")); } });
+      res.on("end", () => resolve(data));
     }).on("error", reject);
+  });
+}
+
+function parseCSV(csv) {
+  const lines = csv.trim().split("\n");
+  const headers = lines[0].split(",").map(h => h.replace(/"/g, "").trim());
+  return lines.slice(1).map(line => {
+    const vals = line.split(",").map(v => v.replace(/"/g, "").trim());
+    return Object.fromEntries(headers.map((h, i) => [h, vals[i]]));
   });
 }
 
 exports.handler = async () => {
   const CORS = { "Access-Control-Allow-Origin": "*", "Content-Type": "application/json" };
   try {
-    // ABS_BA = Building Approvals
-    // Key: measure=1 (number), type_of_building=10 (total), state=5 (WA), freq=M
-    const url = "https://data.api.abs.gov.au/rest/data/ABS,ABS_BA/1.10.5.M?startPeriod=2023-01&format=jsondata&detail=dataonly";
-    const json = await httpGet(url);
+    // BA dataflow, WA = state 5, measure 1 = total dwellings, monthly
+    const url = "https://data.api.abs.gov.au/rest/data/ABS,BA/all?startPeriod=2023-01&format=csv&detail=dataonly";
+    const csv = await httpGet(url);
+    const rows = parseCSV(csv);
 
-    const obs = json?.data?.dataSets?.[0]?.observations;
-    if (!obs) throw new Error("No observations returned");
+    // Filter to WA total dwellings (measure 1, region 5, no sub-type)
+    const waRows = rows.filter(r => {
+      const region  = r.REGION || r.STATE || "";
+      const measure = r.MEASURE || "";
+      return region === "5" && (measure === "1" || measure === "10");
+    });
 
-    const vals = Object.entries(obs)
-      .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }))
-      .map(([, v]) => v[0])
-      .filter(v => v != null && v > 0);
+    if (waRows.length < 2) {
+      // Return diagnostic info
+      return { statusCode: 200, headers: CORS, body: JSON.stringify({
+        error: `WA rows found: ${waRows.length}. Sample headers: ${JSON.stringify(rows[0])}`,
+      })};
+    }
 
-    if (vals.length < 2) throw new Error("Not enough data points");
+    waRows.sort((a, b) => (a.TIME_PERIOD || "").localeCompare(b.TIME_PERIOD || ""));
+    const vals = waRows.map(r => parseFloat(r.OBS_VALUE)).filter(v => !isNaN(v) && v > 0);
 
     const latest = Math.round(vals[vals.length - 1]);
     const prev   = Math.round(vals[vals.length - 2]);

@@ -1,4 +1,4 @@
-// netlify/functions/abs-debug.js — finds building approvals dataflow ID
+// netlify/functions/abs-debug.js — tests BA and ERP_Q with correct keys
 const https = require("https");
 const http  = require("http");
 
@@ -18,24 +18,32 @@ function httpGet(url, depth = 0) {
       }
       let data = "";
       res.on("data", c => data += c);
-      res.on("end", () => resolve({ status: res.statusCode, body: data }));
+      res.on("end", () => resolve({ status: res.statusCode, body: data.slice(0, 2000) }));
     }).on("error", reject);
   });
 }
 
 exports.handler = async () => {
   const CORS = { "Access-Control-Allow-Origin": "*", "Content-Type": "application/json" };
-  try {
-    // Get full list of ABS dataflows, search for building approvals
-    const r = await httpGet("https://data.api.abs.gov.au/rest/dataflow/all?detail=allstubs&format=jsondata");
-    const json = JSON.parse(r.body);
-    // Extract dataflow names and IDs, filter to building-related ones
-    const dataflows = json?.data?.dataflows || [];
-    const building = dataflows
-      .map(d => ({ id: d.id, name: d.name?.en || d.names?.en || "" }))
-      .filter(d => /build|approv|BA|dwell/i.test(d.name + d.id));
-    return { statusCode: 200, headers: CORS, body: JSON.stringify({ total: dataflows.length, building_related: building }, null, 2) };
-  } catch(e) {
-    return { statusCode: 200, headers: CORS, body: JSON.stringify({ error: e.message }) };
+  const results = {};
+
+  const tests = [
+    // BA = Building Approvals, WA state code is 5, measure 1 = total dwellings, M = monthly
+    ["BA_WA", "https://data.api.abs.gov.au/rest/data/ABS,BA/1.5.M?lastNObservations=3&format=jsondata&detail=dataonly"],
+    // Try alternate — just 'all' to see what comes back
+    ["BA_all", "https://data.api.abs.gov.au/rest/data/ABS,BA/all?lastNObservations=1&format=jsondata&detail=dataonly"],
+    // ERP_Q structure — get the dimension metadata so we know the codes
+    ["ERP_Q_structure", "https://data.api.abs.gov.au/rest/dataflow/ABS/ERP_Q?references=descendants&format=jsondata"],
+  ];
+
+  for (const [name, url] of tests) {
+    try {
+      const r = await httpGet(url);
+      results[name] = { status: r.status, preview: r.body };
+    } catch(e) {
+      results[name] = { error: e.message };
+    }
   }
+
+  return { statusCode: 200, headers: CORS, body: JSON.stringify(results, null, 2) };
 };
