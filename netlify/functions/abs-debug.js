@@ -1,4 +1,4 @@
-// netlify/functions/abs-debug.js — tests BA and ERP_Q with correct keys
+// netlify/functions/abs-debug.js — tests candidate building approvals dataflow IDs
 const https = require("https");
 const http  = require("http");
 
@@ -8,7 +8,7 @@ function httpGet(url, depth = 0) {
     const lib = url.startsWith("https") ? https : http;
     lib.get(url, {
       headers: {
-        "Accept": "application/json",
+        "Accept": "text/csv, application/json, */*",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
       }
     }, (res) => {
@@ -18,7 +18,7 @@ function httpGet(url, depth = 0) {
       }
       let data = "";
       res.on("data", c => data += c);
-      res.on("end", () => resolve({ status: res.statusCode, body: data.slice(0, 2000) }));
+      res.on("end", () => resolve({ status: res.statusCode, body: data.slice(0, 500) }));
     }).on("error", reject);
   });
 }
@@ -26,24 +26,25 @@ function httpGet(url, depth = 0) {
 exports.handler = async () => {
   const CORS = { "Access-Control-Allow-Origin": "*", "Content-Type": "application/json" };
   const results = {};
-
-  const tests = [
-    // BA = Building Approvals, WA state code is 5, measure 1 = total dwellings, M = monthly
-    ["BA_WA", "https://data.api.abs.gov.au/rest/data/ABS,BA/1.5.M?lastNObservations=3&format=jsondata&detail=dataonly"],
-    // Try alternate — just 'all' to see what comes back
-    ["BA_all", "https://data.api.abs.gov.au/rest/data/ABS,BA/all?lastNObservations=1&format=jsondata&detail=dataonly"],
-    // ERP_Q structure — get the dimension metadata so we know the codes
-    ["ERP_Q_structure", "https://data.api.abs.gov.au/rest/dataflow/ABS/ERP_Q?references=descendants&format=jsondata"],
+  const candidates = [
+    "BUILDING_APPROVALS_STATES",
+    "BUILDING_APPROVALS",
+    "ABS_BA_STATES",
+    "BA_STATES",
+    "DWELLING_APPROVALS",
+    "DWELL_APPROVALS",
+    "RES_DWELL_STATES",
+    "RES_DWELL",
+    "BUILDING_ACTIVITY",
   ];
-
-  for (const [name, url] of tests) {
+  for (const id of candidates) {
+    const url = `https://data.api.abs.gov.au/rest/data/ABS,${id}/all?lastNObservations=1&format=csv&detail=dataonly`;
     try {
       const r = await httpGet(url);
-      results[name] = { status: r.status, preview: r.body };
+      results[id] = { status: r.status, ok: r.status === 200, preview: r.body.slice(0, 150) };
     } catch(e) {
-      results[name] = { error: e.message };
+      results[id] = { error: e.message };
     }
   }
-
   return { statusCode: 200, headers: CORS, body: JSON.stringify(results, null, 2) };
 };
