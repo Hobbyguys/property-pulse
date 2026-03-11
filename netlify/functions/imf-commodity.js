@@ -1,19 +1,13 @@
 // netlify/functions/imf-commodity.js
-// Iron ore price via metalpriceapi.com (free tier)
-// Ticker: IRON, base: USD
-// Rate returned is oz/USD so we convert: price per troy oz * 32150.7 = price per metric ton
-// Actually metalpriceapi returns units relative to base currency — 1 USD = X units of metal
-// So iron price in USD/t = 1 / rate * 1000 (if rate is per gram) or just 1/rate if per ton
-// We'll log the raw rate first call so we can verify the conversion
+// WA Commodity Indicators via metalpriceapi.com (free tier)
+// Shows: Gold (XAU), Silver (XAG), AUD/USD rate
+// All three are in the base /v1/latest endpoint — single API call
 const https = require("https");
 
 function apiGet(url) {
   return new Promise((resolve, reject) => {
     https.get(url, {
-      headers: {
-        "Accept": "application/json",
-        "User-Agent": "Mozilla/5.0",
-      }
+      headers: { "Accept": "application/json", "User-Agent": "Mozilla/5.0" }
     }, (res) => {
       let data = "";
       res.on("data", c => data += c);
@@ -25,69 +19,105 @@ function apiGet(url) {
   });
 }
 
+function rateToUSD(rate) {
+  // rates[X] = how many X per 1 USD, so USD price = 1/rate
+  return rate ? parseFloat((1 / rate).toFixed(2)) : null;
+}
+
 exports.handler = async () => {
   const CORS = { "Access-Control-Allow-Origin": "*", "Content-Type": "application/json" };
   const API_KEY = process.env.metalpriceapi_key;
   if (!API_KEY) return { statusCode: 500, headers: CORS, body: JSON.stringify({ error: "metalpriceapi_key env var not set" }) };
 
   try {
-    // Latest price — base USD, get IRON
+    // Single call gets everything we need
     const { status, json } = await apiGet(
-      `https://api.metalpriceapi.com/v1/latest?api_key=${API_KEY}&base=USD&currencies=IRON`
+      `https://api.metalpriceapi.com/v1/latest?api_key=${API_KEY}&base=USD&currencies=XAU,XAG,AUD`
     );
 
     if (status !== 200 || !json.success) {
       throw new Error(`API error ${status}: ${JSON.stringify(json).slice(0, 200)}`);
     }
 
-    // Rate = how many IRON units per 1 USD
-    // metalpriceapi returns IRON in USD per troy ounce equivalent
-    // IRON rate is typically ~0.0058 meaning 1 USD buys 0.0058 "units"
-    // To get USD/metric ton: 1 / rate * 1000 (if unit is per kg) or check raw
-    const rawRate = json.rates?.IRON;
-    if (rawRate == null) throw new Error("IRON not in rates: " + JSON.stringify(json).slice(0, 200));
+    const r = json.rates;
 
-    // metalpriceapi IRON is priced per metric ton in USD directly when base=USD
-    // i.e. rate = USD per 1 ton means price = 1/rate ... but let's expose raw for verification
-    // Based on docs: rates[IRON] = amount of IRON you get per 1 USD base
-    // So USD price per ton = 1 / rawRate  (if IRON unit = metric ton)
-    // Current iron ore ~$100/t means rawRate should be ~0.01
-    const pricePerTon = parseFloat((1 / rawRate).toFixed(2));
+    // Gold: XAU rate = troy oz per USD → invert for USD/oz
+    const goldUSD  = rateToUSD(r.XAU);   // USD per troy oz
+    // Silver: XAG rate = troy oz per USD → invert
+    const silverUSD = rateToUSD(r.XAG);  // USD per troy oz
+    // AUD/USD: AUD rate = AUD per 1 USD → invert for USD per AUD
+    const audUSD   = r.AUD ? parseFloat((1 / r.AUD).toFixed(4)) : null;
 
-    // Fetch historical — last 7 days for sparkline
-    const end = new Date();
+    if (!goldUSD || !silverUSD || !audUSD) {
+      throw new Error("Missing rates: " + JSON.stringify({ XAU: r.XAU, XAG: r.XAG, AUD: r.AUD }));
+    }
+
+    // Now fetch historical (30 days) for sparklines on all three
+    const end   = new Date();
     const start = new Date();
-    start.setDate(end.getDate() - 42); // ~6 weeks to get 6 data points
+    start.setDate(end.getDate() - 42);
     const fmt = d => d.toISOString().split("T")[0];
 
     const hist = await apiGet(
-      `https://api.metalpriceapi.com/v1/timeframe?api_key=${API_KEY}&base=USD&currencies=IRON&start_date=${fmt(start)}&end_date=${fmt(end)}`
+      `https://api.metalpriceapi.com/v1/timeframe?api_key=${API_KEY}&base=USD&currencies=XAU,XAG,AUD&start_date=${fmt(start)}&end_date=${fmt(end)}`
     );
 
-    let trend = [];
-    let change = null;
+    // Build sparklines — sample weekly (every 7th day)
+    let goldTrend = [], silverTrend = [], audTrend = [];
+    let goldChange = null, silverChange = null, audChange = null;
 
     if (hist.json?.success && hist.json?.rates) {
       const dates = Object.keys(hist.json.rates).sort();
-      // Sample every 7th day (~weekly points)
       const weekly = dates.filter((_, i) => i % 7 === 0).slice(-6);
-      trend = weekly.map(d => parseFloat((1 / hist.json.rates[d].IRON).toFixed(1)));
+
+      goldTrend   = weekly.map(d => parseFloat((1 / hist.json.rates[d].XAU).toFixed(0)));
+      silverTrend = weekly.map(d => parseFloat((1 / hist.json.rates[d].XAG).toFixed(2)));
+      audTrend    = weekly.map(d => parseFloat((1 / hist.json.rates[d].AUD).toFixed(4)));
+
       if (dates.length >= 2) {
-        const prev = 1 / hist.json.rates[dates[dates.length - 2]].IRON;
-        change = parseFloat((((pricePerTon - prev) / prev) * 100).toFixed(1));
+        const prev = hist.json.rates[dates[dates.length - 2]];
+        goldChange   = parseFloat((((goldUSD   - 1/prev.XAU) / (1/prev.XAU)) * 100).toFixed(1));
+        silverChange = parseFloat((((silverUSD - 1/prev.XAG) / (1/prev.XAG)) * 100).toFixed(1));
+        audChange    = parseFloat((((audUSD    - 1/prev.AUD) / (1/prev.AUD)) * 100).toFixed(1));
       }
     }
 
-    const status2 = pricePerTon >= 120 ? "green" : pricePerTon >= 90 ? "amber" : "red";
+    // Status based on AUD/USD (primary WA economy signal)
+    // AUD > 0.65 = strong, 0.60-0.65 = moderate, < 0.60 = weak
+    const audStatus = audUSD >= 0.65 ? "green" : audUSD >= 0.60 ? "amber" : "red";
 
     return { statusCode: 200, headers: CORS, body: JSON.stringify({
-      value: `$${pricePerTon.toFixed(0)}`,
-      change,
-      trend,
-      unit: "USD/t iron ore",
-      status: status2,
-      statusLabel: status2 === "green" ? "Strong Demand" : status2 === "amber" ? "Moderate" : "Weak Demand",
-      _debug: { rawRate, pricePerTon },
+      // Primary display value = gold price (most recognisable)
+      value: `$${goldUSD.toLocaleString()}`,
+      change: goldChange,
+      trend: goldTrend,
+      unit: "USD/oz gold",
+      status: audStatus,
+      statusLabel: audStatus === "green" ? "Commodities Strong" : audStatus === "amber" ? "Moderate" : "Commodities Weak",
+      // Extra fields for expanded card display
+      indicators: [
+        {
+          label: "Gold",
+          value: `$${goldUSD.toLocaleString()}`,
+          unit: "USD/oz",
+          change: goldChange,
+          trend: goldTrend,
+        },
+        {
+          label: "Silver",
+          value: `$${silverUSD.toFixed(2)}`,
+          unit: "USD/oz",
+          change: silverChange,
+          trend: silverTrend,
+        },
+        {
+          label: "AUD/USD",
+          value: audUSD.toFixed(4),
+          unit: "exchange rate",
+          change: audChange,
+          trend: audTrend,
+        },
+      ],
     })};
   } catch (err) {
     console.error("imf-commodity:", err.message);
