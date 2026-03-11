@@ -1,7 +1,5 @@
 // netlify/functions/abs-approvals.js
-// ABS RES_DWELL — Residential Dwellings approved, WA (Perth + Rest of WA), quarterly
-// Confirmed working dataflow. WA regions: 5GPER (Perth) + 5RWAU (Rest of WA)
-// Measure 1 = total dwellings approved, FREQ = Q (quarterly)
+// ABS RES_DWELL — WA residential dwellings approved (Perth + Rest of WA), quarterly
 const https = require("https");
 const http  = require("http");
 
@@ -30,43 +28,37 @@ function httpGet(url, depth = 0) {
 exports.handler = async () => {
   const CORS = { "Access-Control-Allow-Origin": "*", "Content-Type": "application/json" };
   try {
-    // Fetch last 8 quarters for WA — both Perth (5GPER) and Rest of WA (5RWAU), measure 1
     const url = "https://data.api.abs.gov.au/rest/data/ABS,RES_DWELL/1.5GPER+5RWAU.Q?lastNObservations=8&format=csv&detail=dataonly";
     const csv = await httpGet(url);
-
     const lines = csv.trim().split("\n").filter(l => l.trim());
-    if (lines.length < 2) throw new Error("Empty CSV from RES_DWELL");
-
     const headers = lines[0].split(",").map(h => h.replace(/"/g, "").trim());
     const rows = lines.slice(1).map(line => {
       const vals = line.split(",").map(v => v.replace(/"/g, "").trim());
       return Object.fromEntries(headers.map((h, i) => [h, vals[i]]));
     });
 
-    // Group by TIME_PERIOD and sum Perth + Rest of WA
+    // Sum Perth + Rest of WA per quarter
     const byPeriod = {};
     for (const row of rows) {
-      const period = row.TIME_PERIOD;
       const val = parseFloat(row.OBS_VALUE);
-      if (!isNaN(val)) {
-        byPeriod[period] = (byPeriod[period] || 0) + val;
-      }
+      if (!isNaN(val)) byPeriod[row.TIME_PERIOD] = (byPeriod[row.TIME_PERIOD] || 0) + val;
     }
 
     const periods = Object.keys(byPeriod).sort();
-    if (periods.length < 2) throw new Error(`Not enough periods. Found: ${periods.length}`);
+    if (periods.length < 2) throw new Error("Not enough periods");
 
     const vals = periods.map(p => Math.round(byPeriod[p]));
     const latest = vals[vals.length - 1];
     const prev   = vals[vals.length - 2];
     const change = parseFloat((((latest - prev) / prev) * 100).toFixed(1));
 
+    // WA quarterly benchmarks: >9000 = strong, >6500 = moderate, <6500 = low
     return { statusCode: 200, headers: CORS, body: JSON.stringify({
       value: latest.toLocaleString(),
       change,
       trend: vals.slice(-6),
       unit: "dwellings/qtr WA",
-      status: latest >= 7000 ? "green" : latest >= 5000 ? "amber" : "red",
+      status: latest >= 9000 ? "green" : latest >= 6500 ? "amber" : "red",
       statusLabel: change >= 0 ? "Rising Supply" : "Declining Supply",
     })};
   } catch (err) {
