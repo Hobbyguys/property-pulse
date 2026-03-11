@@ -1,30 +1,33 @@
 // netlify/functions/imf-commodity.js
 const https = require("https");
+const http  = require("http");
 
-function httpsGet(url) {
+function httpGet(url, depth = 0) {
+  if (depth > 5) return Promise.reject(new Error("Too many redirects"));
   return new Promise((resolve, reject) => {
-    const options = {
+    const lib = url.startsWith("https") ? https : http;
+    const req = lib.get(url, {
       headers: {
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "User-Agent": "Mozilla/5.0 (compatible; PropertyPulse/1.0)",
+        "Accept": "application/json, */*",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Referer": "https://www.imf.org/",
       }
-    };
-    https.get(url, options, (res) => {
-      // IMF sometimes redirects — follow manually
-      if (res.statusCode === 301 || res.statusCode === 302) {
-        return httpsGet(res.headers.location).then(resolve).catch(reject);
+    }, (res) => {
+      if ([301, 302, 303, 307, 308].includes(res.statusCode)) {
+        const location = res.headers.location;
+        if (!location) return reject(new Error("Redirect with no location header"));
+        const next = location.startsWith("http") ? location : new URL(location, url).href;
+        return httpGet(next, depth + 1).then(resolve).catch(reject);
       }
-      if (res.statusCode === 403) return reject(new Error("IMF returned 403 — try again later"));
-      if (res.statusCode !== 200) return reject(new Error(`IMF HTTP ${res.statusCode}`));
+      if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
       let data = "";
       res.on("data", chunk => data += chunk);
       res.on("end", () => {
         try { resolve(JSON.parse(data)); }
-        catch (e) { reject(new Error("Invalid JSON from IMF")); }
+        catch (e) { reject(new Error("Invalid JSON")); }
       });
-    }).on("error", reject);
+    });
+    req.on("error", reject);
   });
 }
 
@@ -32,7 +35,7 @@ exports.handler = async () => {
   const CORS = { "Access-Control-Allow-Origin": "*", "Content-Type": "application/json" };
   try {
     const url = "https://www.imf.org/external/datamapper/api/v1/PIORECR?periods=10";
-    const json = await httpsGet(url);
+    const json = await httpGet(url);
     const series = json?.values?.PIORECR?.WLD;
     if (!series) throw new Error("Unexpected IMF response shape");
     const vals = Object.keys(series).sort().map(y => series[y]).filter(v => v != null);
