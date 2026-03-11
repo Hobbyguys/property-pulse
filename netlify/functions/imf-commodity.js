@@ -1,7 +1,8 @@
 // netlify/functions/imf-commodity.js
-// Iron ore price via FRED (St. Louis Fed) — free, no API key, mirrors IMF PIORECRUSDM series
-// Series: PIORECRUSDM = Global price of Iron Ore, USD per metric ton, monthly
-// IMF blocks Netlify IPs directly; FRED does not.
+// Iron ore price — World Bank Open Data API (no key required)
+// Indicator: PIORECR (IMF Primary Commodity: Iron Ore, USD per dry metric ton)
+// World Bank mirrors this as: https://api.worldbank.org/v2/country/WLD/indicator/PIORECR
+// Fallback: use annual data if monthly unavailable
 const https = require("https");
 const http  = require("http");
 
@@ -23,7 +24,7 @@ function httpGet(url, depth = 0) {
       if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode} from ${url}`));
       let data = "";
       res.on("data", c => data += c);
-      res.on("end", () => { try { resolve(JSON.parse(data)); } catch(e) { reject(new Error("Invalid JSON: " + data.slice(0,100))); }});
+      res.on("end", () => { try { resolve(JSON.parse(data)); } catch(e) { reject(new Error("Invalid JSON: " + data.slice(0, 100))); }});
     }).on("error", reject);
   });
 }
@@ -31,38 +32,36 @@ function httpGet(url, depth = 0) {
 exports.handler = async () => {
   const CORS = { "Access-Control-Allow-Origin": "*", "Content-Type": "application/json" };
   try {
-    // FRED public API — no key required for this endpoint
-    // Returns last 12 monthly observations of iron ore price (USD/metric ton)
-    const url = "https://fred.stlouisfed.org/graph/fredgraph.json?id=PIORECRUSDM&vintage_date=&realtime_start=&realtime_end=&limit=12&sort_order=asc";
+    // World Bank Data API — free, no key, returns JSON
+    // mrv=12 = most recent 12 values, per_page=12, format=json
+    const url = "https://api.worldbank.org/v2/country/WLD/indicator/PIORECR?format=json&mrv=12&per_page=12";
     const json = await httpGet(url);
 
-    // FRED fredgraph.json returns: { "observations": [{ "date": "2024-01-01", "value": "123.45" }, ...] }
-    // or sometimes just an array directly depending on endpoint used
-    // Use the observations array
-    let obs = json.observations || json;
-    if (!Array.isArray(obs) || obs.length === 0) throw new Error("Unexpected FRED shape: " + JSON.stringify(json).slice(0, 200));
+    // Response shape: [ { page, pages, ... }, [ { date, value, ... }, ... ] ]
+    if (!Array.isArray(json) || json.length < 2) throw new Error("Unexpected WB shape: " + JSON.stringify(json).slice(0, 200));
+    
+    const records = json[1]
+      .filter(r => r.value !== null && r.value !== undefined)
+      .sort((a, b) => a.date.localeCompare(b.date));
 
-    const valid = obs
-      .filter(o => o.value && o.value !== "." && !isNaN(parseFloat(o.value)))
-      .map(o => ({ date: o.date, value: parseFloat(o.value) }));
+    if (records.length < 2) throw new Error(`Not enough WB records. Got: ${json[1]?.length}`);
 
-    if (valid.length < 2) throw new Error(`Not enough valid FRED observations. Got ${obs.length} total.`);
-
-    const latest = valid[valid.length - 1].value;
-    const prev   = valid[valid.length - 2].value;
+    const vals = records.map(r => parseFloat(r.value));
+    const latest = vals[vals.length - 1];
+    const prev   = vals[vals.length - 2];
     const change = parseFloat((((latest - prev) / prev) * 100).toFixed(1));
-    const trend  = valid.slice(-6).map(o => parseFloat(o.value.toFixed(1)));
+    const latestDate = records[records.length - 1].date;
 
-    // Iron ore benchmarks (USD/t): >120 = strong WA export conditions, >90 = moderate, <90 = weak
     const status = latest >= 120 ? "green" : latest >= 90 ? "amber" : "red";
 
     return { statusCode: 200, headers: CORS, body: JSON.stringify({
       value: `$${latest.toFixed(0)}`,
       change,
-      trend,
+      trend: vals.slice(-6).map(v => parseFloat(v.toFixed(1))),
       unit: "USD/t iron ore",
       status,
       statusLabel: status === "green" ? "Strong Demand" : status === "amber" ? "Moderate" : "Weak Demand",
+      note: `As of ${latestDate}`,
     })};
   } catch (err) {
     console.error("imf-commodity:", err.message);
