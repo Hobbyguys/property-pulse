@@ -111,14 +111,33 @@
     card.classList.remove("green", "amber", "red");
     card.classList.add(data.status);
 
-    valEl.innerHTML  = data.value;
+    // Commodity card gets special multi-indicator rendering
+    if (ind.id === "commodity" && data.indicators) {
+      valEl.innerHTML = data.indicators.map(item => {
+        const iUp = item.change >= 0;
+        const chg = item.change != null
+          ? `<span style="font-size:0.7rem;color:${iUp ? "var(--green)" : "var(--red)"}">
+               ${iUp ? "▲" : "▼"} ${Math.abs(item.change)}%
+             </span>`
+          : "";
+        return `<div style="display:flex;align-items:baseline;gap:0.4rem;margin-bottom:0.15rem;">
+          <span style="font-size:0.7rem;color:var(--muted);width:3.5rem;">${item.label}</span>
+          <span style="font-size:1.1rem;font-weight:700;color:var(--fg);">${item.value}</span>
+          <span style="font-size:0.65rem;color:var(--muted2);">${item.unit}</span>
+          ${chg}
+        </div>`;
+      }).join("");
+      if (spkEl) spkEl.innerHTML = sparklineSVG(data.trend, data.status);
+    } else {
+      valEl.innerHTML = data.value;
+      if (spkEl) spkEl.innerHTML = sparklineSVG(data.trend, data.status);
+    }
+
     statEl.innerHTML = `
       <span class="status-dot" style="background:${col.dot}"></span>
       <span style="color:${col.text}">${data.statusLabel}</span>`;
     chgEl.innerHTML  = chgText;
     chgEl.style.color = up ? "var(--green)" : "var(--red)";
-
-    if (spkEl) spkEl.innerHTML = sparklineSVG(data.trend, data.status);
   }
 
   /* ── Patch a card into error state ── */

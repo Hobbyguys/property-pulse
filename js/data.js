@@ -75,13 +75,13 @@ const INDICATORS = [
     fetcher: null,
   },
 
-  /* ── 6. COMMODITY OUTLOOK — IMF (live) ── */
+  /* ── 6. COMMODITY OUTLOOK — Metal Price API (live) ── */
   {
     id: "commodity",
     label: "Commodity Outlook",
     icon: "⛏️",
-    source: "IMF Commodity Prices",
-    note: "Iron ore price index (USD/t) — key indicator for WA resource sector confidence.",
+    source: "Metal Price API",
+    note: "Gold, Silver &amp; AUD/USD — key indicators for WA resource sector confidence.",
     locked: false,
     fetcher: async function () {
       const res  = await fetch("/.netlify/functions/imf-commodity");
